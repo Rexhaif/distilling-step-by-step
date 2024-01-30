@@ -25,6 +25,10 @@ from train_utils import train_and_evaluate
 
 def run(args):
     #### Prepare datasets
+
+    #### Prepare datasets Prepare data for training
+    tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
+
     if args.dataset == 'cqa':
         dataset_loader = CQADatasetLoader()
     elif args.dataset == 'svamp':
@@ -37,6 +41,9 @@ def run(args):
         dataset_loader = SVAMPDatasetLoader()
         dataset_loader_svamp = SVAMPDatasetLoader()
         dataset_loader_asdiv = ASDivDatasetLoader()
+    elif args.dataset == 'esnli+cqa':
+        dataset_loader_esnli = ESNLIDatasetLoader()
+        dataset_loader_cqa = CQADatasetLoader()
     else:
         raise ValueError
 
@@ -47,8 +54,27 @@ def run(args):
             'train': concatenate_datasets([datasets_svamp['train'], datasets_asdiv['train']]),
             'test': datasets_svamp['test']
         })
+    elif args.dataset == 'esnli+cqa':
+        datasets_esnli = dataset_loader_esnli.load_from_json()
+        datasets_esnli = datasets_esnli.map(
+            lambda example: {'input': f"eSNLI:{tokenizer.eos_token.join([example['premise'], example['hypothesis']])}"},
+            remove_columns=['premise', 'hypothesis'],
+        )
+        datasets_cqa = dataset_loader_cqa.load_from_json()
+        datasets_cqa = datasets_cqa.map(
+            lambda example: {'input': f"CQA:{example['input']}"}
+        )
+        datasets = DatasetDict({
+            'train': concatenate_datasets([datasets_esnli['train'], datasets_cqa['train']]),
+            'test': concatenate_datasets([datasets_esnli['test']])
+        })
     else:
         datasets = dataset_loader.load_from_json()
+        if 'nli' in args.dataset:
+            datasets = datasets.map(
+                lambda example: {'input': tokenizer.eos_token.join([example['premise'], example['hypothesis']])},
+                remove_columns=['premise', 'hypothesis'],
+            )
 
     if args.llm is None:
         pass
@@ -61,6 +87,14 @@ def run(args):
             train_llm_labels = train_llm_labels_svamp + train_llm_labels_asdiv
             # test set = SVAMP test
             test_llm_rationales, test_llm_labels = dataset_loader_svamp.load_llm_preds(split='test')
+        elif args.dataset == 'esnli+cqa':
+            # training set = ESNLI training + CQA training
+            train_llm_rationales_esnli, train_llm_labels_esnli = dataset_loader_esnli.load_llm_preds(split='train')
+            train_llm_rationales_cqa, train_llm_labels_cqa = dataset_loader_cqa.load_llm_preds(split='train')
+            train_llm_rationales = train_llm_rationales_esnli + train_llm_rationales_cqa
+            train_llm_labels = train_llm_labels_esnli + train_llm_labels_cqa
+            # test set = ESNLI test
+            test_llm_rationales, test_llm_labels = dataset_loader_esnli.load_llm_preds(split='test')
         else:
             train_llm_rationales, train_llm_labels = dataset_loader.load_llm_preds(split='train')
             test_llm_rationales, test_llm_labels = dataset_loader.load_llm_preds(split='test')
@@ -79,18 +113,27 @@ def run(args):
     if args.subsample < 1.0:
         datasets['train'] = datasets['train'].train_test_split(test_size=1.0-args.subsample, seed=args.run)['train']
 
-    if dataset_loader.has_valid:
-        if args.llm is None:
-            pass
-        elif args.llm == 'palm':
-            valid_llm_rationales, valid_llm_labels = dataset_loader.load_llm_preds(split='valid')
-        elif args.llm == 'gpt':
-            valid_llm_rationales, valid_llm_labels = dataset_loader.load_gpt_preds(split='valid')
-        else:
-            raise ValueError
+    if args.dataset != "esnli+cqa":
+        if dataset_loader.has_valid:
+            if args.llm is None:
+                pass
+            elif args.llm == 'palm':
+                valid_llm_rationales, valid_llm_labels = dataset_loader.load_llm_preds(split='valid')
+            elif args.llm == 'gpt':
+                valid_llm_rationales, valid_llm_labels = dataset_loader.load_gpt_preds(split='valid')
+            else:
+                raise ValueError
 
-        datasets['valid'] = datasets['valid'].add_column('llm_label', valid_llm_labels)
-        datasets['valid'] = datasets['valid'].add_column('llm_rationale', valid_llm_rationales)
+            datasets['valid'] = datasets['valid'].add_column('llm_label', valid_llm_labels)
+            datasets['valid'] = datasets['valid'].add_column('llm_rationale', valid_llm_rationales)
+        else:
+            train_valid_datasets = datasets['train'].train_test_split(test_size=0.1, seed=0)
+
+            datasets = DatasetDict({
+                'train': train_valid_datasets['train'],
+                'valid': train_valid_datasets['test'],
+                'test': datasets['test'],
+            })
     else:
         train_valid_datasets = datasets['train'].train_test_split(test_size=0.1, seed=0)
 
@@ -124,15 +167,7 @@ def run(args):
             datasets = datasets.remove_columns('rationale')
         datasets = datasets.rename_column('llm_rationale', 'rationale')
 
-
-    #### Prepare datasets Prepare data for training
-    tokenizer = AutoTokenizer.from_pretrained(args.from_pretrained)
-
-    if 'nli' in args.dataset:
-        datasets = datasets.map(
-            lambda example: {'input': tokenizer.eos_token.join([example['premise'], example['hypothesis']])},
-            remove_columns=['premise', 'hypothesis'],
-        )
+    
 
 
     if args.model_type == 'task_prefix' and args.llm is not None:
