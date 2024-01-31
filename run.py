@@ -41,9 +41,10 @@ def run(args):
         dataset_loader = SVAMPDatasetLoader()
         dataset_loader_svamp = SVAMPDatasetLoader()
         dataset_loader_asdiv = ASDivDatasetLoader()
-    elif args.dataset == 'esnli+cqa':
-        dataset_loader_esnli = ESNLIDatasetLoader()
+    elif args.dataset == 'anli+cqa+esnli':
+        dataset_loader_anli = ANLI1DatasetLoader()
         dataset_loader_cqa = CQADatasetLoader()
+        dataset_loader_esnli = ESNLIDatasetLoader()
     else:
         raise ValueError
 
@@ -54,19 +55,24 @@ def run(args):
             'train': concatenate_datasets([datasets_svamp['train'], datasets_asdiv['train']]),
             'test': datasets_svamp['test']
         })
-    elif args.dataset == 'esnli+cqa':
-        datasets_esnli = dataset_loader_esnli.load_from_json()
-        datasets_esnli = datasets_esnli.map(
-            lambda example: {'input': f"eSNLI:{tokenizer.eos_token.join([example['premise'], example['hypothesis']])}"},
+    elif args.dataset == 'anli+cqa+esnli':
+        datasets_anli = dataset_loader_anli.load_from_json()
+        datasets_anli = datasets_anli.map(
+            lambda example: {'input': f"{tokenizer.eos_token.join([example['premise'], example['hypothesis']])}"},
             remove_columns=['premise', 'hypothesis'],
         )
         datasets_cqa = dataset_loader_cqa.load_from_json()
         datasets_cqa = datasets_cqa.map(
-            lambda example: {'input': f"CQA:{example['input']}"}
+            lambda example: {'input': f"{example['input']}"}
+        )
+        datasets_esnli = dataset_loader_esnli.load_from_json()
+        datasets_esnli = datasets_esnli.map(
+            lambda example: {'input': f"{tokenizer.eos_token.join([example['premise'], example['hypothesis']])}"},
+            remove_columns=['premise', 'hypothesis'],
         )
         datasets = DatasetDict({
-            'train': concatenate_datasets([datasets_esnli['train'], datasets_cqa['train']]),
-            'test': concatenate_datasets([datasets_esnli['test']])
+            'train': concatenate_datasets([datasets_anli['train'], datasets_cqa['train'], datasets_esnli['train']]),
+            'test': concatenate_datasets([datasets_cqa['test']])
         })
     else:
         datasets = dataset_loader.load_from_json()
@@ -87,14 +93,15 @@ def run(args):
             train_llm_labels = train_llm_labels_svamp + train_llm_labels_asdiv
             # test set = SVAMP test
             test_llm_rationales, test_llm_labels = dataset_loader_svamp.load_llm_preds(split='test')
-        elif args.dataset == 'esnli+cqa':
-            # training set = ESNLI training + CQA training
-            train_llm_rationales_esnli, train_llm_labels_esnli = dataset_loader_esnli.load_llm_preds(split='train')
+        elif args.dataset == 'anli+cqa+esnli':
+            # training set = aNLI training + CQA training + eSNLI training
+            train_llm_rationales_anli, train_llm_labels_anli = dataset_loader_anli.load_llm_preds(split='train')
             train_llm_rationales_cqa, train_llm_labels_cqa = dataset_loader_cqa.load_llm_preds(split='train')
-            train_llm_rationales = train_llm_rationales_esnli + train_llm_rationales_cqa
-            train_llm_labels = train_llm_labels_esnli + train_llm_labels_cqa
-            # test set = ESNLI test
-            test_llm_rationales, test_llm_labels = dataset_loader_esnli.load_llm_preds(split='test')
+            train_llm_rationales_esnli, train_llm_labels_esnli = dataset_loader_esnli.load_llm_preds(split='train')
+            train_llm_rationales = train_llm_rationales_anli + train_llm_rationales_cqa + train_llm_rationales_esnli
+            train_llm_labels = train_llm_labels_anli + train_llm_labels_cqa + train_llm_labels_esnli
+            # test set = CQA test
+            test_llm_rationales, test_llm_labels = dataset_loader_cqa.load_llm_preds(split='test')
         else:
             train_llm_rationales, train_llm_labels = dataset_loader.load_llm_preds(split='train')
             test_llm_rationales, test_llm_labels = dataset_loader.load_llm_preds(split='test')
@@ -113,7 +120,7 @@ def run(args):
     if args.subsample < 1.0:
         datasets['train'] = datasets['train'].train_test_split(test_size=1.0-args.subsample, seed=args.run)['train']
 
-    if args.dataset != "esnli+cqa":
+    if args.dataset != "anli+cqa+esnli":
         if dataset_loader.has_valid:
             if args.llm is None:
                 pass
